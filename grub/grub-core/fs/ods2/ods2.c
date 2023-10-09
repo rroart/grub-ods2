@@ -191,7 +191,7 @@ grub_ods2_iterate_dir (grub_fshelp_node_t dir,
 
   /* Search the file.  */
 
-  struct grub_ods2_data * data = 0; // TODO
+  struct grub_ods2_data * data = diro->data;
   struct _dir * dr = (void *) &data->mfd;
   
   while (1) {
@@ -414,7 +414,7 @@ grub_ods2_open (struct grub_file *file, const char *name)
   grub_memcpy (data->inode, &fdiro->inode, sizeof (struct _fh2));
   grub_free (fdiro);
 
-  struct _fh2 * file_header = 0; // TODO
+  struct _fh2 * file_header = &data->file_header;
   //struct _fatdef * fat = &file_header->fh2$w_recattr;
   int filemax = (VMSSWAP(file_header->fh2$w_recattr.fat$l_efblk)<<9)-512+file_header->fh2$w_recattr.fat$w_ffbyte;
 
