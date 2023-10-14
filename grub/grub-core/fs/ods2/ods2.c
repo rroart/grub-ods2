@@ -75,13 +75,26 @@ static int ods2_index_block_map (unsigned int logical_block, struct grub_ods2_da
 static int ods2_block_map (unsigned int logical_block, struct grub_ods2_data * data);
 int get_fm2_val(unsigned short ** mpp, unsigned int * phyblk, unsigned int *phylen);
 char * grub_my_new_substring (const char *buf, grub_size_t start, grub_size_t end);
+void printbuf(const void * buf, const int len);
+void printbuf16(const void * buf);
+
+void printbuf(const void * buf, const int len) {
+  for (int i = 0; i < len; i++) {
+      grub_dprintf("ods", "%x ", *((char *) buf) + i);
+  }
+}
+
+void printbuf16(const void * buf) {
+  const unsigned char * c = buf;
+  grub_dprintf("ods", "%x %x %x %x %x %x %x %x %x %x %x %x %x %x %x %x ", c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15]);
+}
 
 struct grub_fshelp_node
 {
   struct grub_ods2_data *data;
-  struct _fh2 inode;
-  int ino;
-  int inode_read;
+  struct _fh2 file_header;
+  int filenum;
+  int file_header_read;
 };
 
 /* Information about a "mounted" ods2 filesystem.  */
@@ -91,11 +104,9 @@ struct grub_ods2_data
   struct _fh2 index_header;
   struct _fh2 mfd_header;
   char mfd[512];
-  struct _fh2 file_header;
   struct _fh2 dir;
-  int log_group_desc_size;
   grub_disk_t disk;
-  struct _fh2 *inode;
+  struct _fh2 *file_header;
   struct grub_fshelp_node diropen;
 };
 
@@ -118,14 +129,14 @@ void *
 addme(void * addr, short offset) {
   return (unsigned short *) addr + offset;
 }
-*/
+ */
 
 /* Create a new NUL-terminated string on the heap as a substring of BUF.
    The range of buf included is the half-open interval [START,END).
    The index START is inclusive, END is exclusive.  */
 char *
 grub_my_new_substring (const char *buf,
-                    grub_size_t start, grub_size_t end)
+		       grub_size_t start, grub_size_t end)
 {
   if (end < start)
     return 0;
@@ -138,15 +149,16 @@ grub_my_new_substring (const char *buf,
   return s;
 }
 
-/* Read the inode INO for the file described by DATA into INODE.  */
+/* Read the file_header INO for the file described by DATA into FILE_HEADER.  */
 static grub_err_t
-grub_ods2_read_inode (struct grub_ods2_data *data,
-		      int ino, struct _fh2 *inode)
+grub_ods2_read_file_header (struct grub_ods2_data *data,
+			    int ino, struct _fh2 *file_header)
 {
-  /* Read the inode.  */
+  /* Read the file_header.  */
 
-  ods2_read_old((void *) inode, sizeof(struct _fh2), data -> disk, data, ino);
-  
+  ods2_read_old((void *) file_header, sizeof(struct _fh2), data -> disk, data, ino);
+  printbuf16(file_header);
+
   return 0;
 }
 
@@ -161,16 +173,33 @@ grub_ods2_mount (grub_disk_t disk)
 
   grub_disk_read(disk, HOME_BLOCK, 0, 512, home_block);
 
-  if (mymemcmp(home_block->hm2$t_format, (char *) "DECFILE11B  ", 12) != 0)
-      return 0;
+  //grub_dprintf("ods", "hm %s", home_block->hm2$t_format);
+  if (mymemcmp(home_block->hm2$t_format, (char *) "DECFILE11B  ", 12) != 0) {
+    grub_error (GRUB_ERR_BAD_FS, "not an ODS2 filesystem");
+    return 0;
+  }
+  grub_dprintf("ods", "hm %s", home_block->hm2$t_format);
 
   grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize), 0, 512, &data->index_header);
 
   grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize) + (4 - 1), 0, 512, &data->mfd_header);
 
-  grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize) + (4 - 1), 0, 512, &data->file_header);
+  grub_dprintf("ods", "d %lx", (long unsigned int) data);
+  printbuf16(&data->mfd_header);
+
+  data->disk = disk;
+  data->diropen.data = data;
+  data->diropen.filenum = 4;
+  data->diropen.file_header_read = 1;
+  data->file_header = &data->diropen.file_header;
+
+  grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize) + (4 - 1), 0, 512, data->file_header);
+  printbuf16(&data->file_header);
 
   ods2_read_old((void *) &data->mfd, 512, disk, data, 0);
+
+  printbuf16(data->mfd);
+  printbuf16(&data->mfd);
 
   return data;
 }
@@ -182,132 +211,143 @@ grub_ods2_iterate_dir (grub_fshelp_node_t dir,
   //unsigned int fpos = 0;
   struct grub_fshelp_node *diro = (struct grub_fshelp_node *) dir;
 
-  if (! diro->inode_read)
+  if (! diro->file_header_read)
     {
-      grub_ods2_read_inode (diro->data, diro->ino, &diro->inode);
-      if (grub_errno)
-	return 0;
+      grub_ods2_read_file_header (diro->data, diro->filenum, &diro->file_header);
+      if (grub_errno) {
+	  grub_dprintf("ods", "ERRNO");
+	  return 0;}
     }
 
   /* Search the file.  */
 
+  grub_dprintf("ods", "d %lx %lx", (long unsigned int) diro, (long unsigned int) diro->data);
   struct grub_ods2_data * data = diro->data;
+  printbuf16(data->mfd);
+  printbuf16(&data->mfd);
   struct _dir * dr = (void *) &data->mfd;
-  
+
   while (1) {
-    //char * rest, ch;
-    // int str_chk;
+      //char * rest, ch;
+      // int str_chk;
 
-    struct _fh2 * file_header = &data->file_header;
-    if ((VMSLONG(data->file_header.fh2$l_filechar) & FH2$M_DIRECTORY)==0)
-      {
-	grub_errno = GRUB_ERR_BAD_FILE_TYPE;
-	return 0;
-      }
+      struct _fh2 * file_header = &data->mfd_header;
+      grub_dprintf("ods", "f %x %x %x", file_header->fh2$l_filechar, file_header->fh2$w_fid.fid$w_num, file_header->fh2$w_fid.fid$w_seq);
+      if ((VMSLONG(file_header->fh2$l_filechar) & FH2$M_DIRECTORY)==0)
+	{
+	  grub_errno = GRUB_ERR_BAD_FILE_TYPE;
+	  printbuf16(file_header);
+	  grub_dprintf("ods", "BAD");
+	  return 0;
+	}
 
-    /* skip to next slash or end of filename (space) */
-    /*
+      /* skip to next slash or end of filename (space) */
+      /*
     for (rest = (char *) path; (ch = *rest) && !grub_isspace (ch) && ch != '/';
 	 rest++);
 
-    *rest = 0;
-    */
-    
-    do {
+       *rest = 0;
+       */
 
-      if (VMSWORD(dr->dir$w_size) > MAXREC)
-	{
-	  //grub_printf("dr %x %x %x %x\n",dr,dr->dir$w_size,dr->dir$w_verlimit,dr->dir$b_namecount); 
-	  return 1;
-	}
+      do {
 
-
-      struct _dir1 *de = (struct _dir1 *) (&dr->dir$t_name + ((dr->dir$b_namecount + 1) & ~1));
-      //struct _fiddef * fid = &de->dir$fid;
-    int filenum = de->dir$fid.fid$w_num + (de->dir$fid.fid$b_nmx<<16);
-    struct _hm2 * home_block = &data->home_block;
-    int phy = ods2_index_block_map(VMSLONG(home_block->hm2$w_ibmapvbn) + VMSWORD(home_block->hm2$w_ibmapsize) + filenum - 1, data);
-    //grub_printf("filen %x %x %x %x %x\n",filenum,fid->fid$w_num,fid->fid$b_nmx,fid->fid$w_seq,phy);
-    grub_disk_t disk = diro->data->disk;
-    grub_disk_read(disk, phy, 0, 512, file_header);
-    //grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize) + (filenum - 1), 0, 512, file_header);
-    // TODO filepos = 0;
-    //ods2_read_old((char *) path, 512, disk, data, 0);
-    // TODO filepos = 0;
-    //dr = (void *) path;
+	  if (VMSWORD(dr->dir$w_size) > MAXREC)
+	    {
+	      //grub_printf("dr %x %x %x %x\n",dr,dr->dir$w_size,dr->dir$w_verlimit,dr->dir$b_namecount);
+	      grub_dprintf("ods", "MAX");
+	      return 1;
+	    }
 
 
+	  struct _dir1 *de = (struct _dir1 *) (&dr->dir$t_name + ((dr->dir$b_namecount + 1) & ~1));
+	  //struct _fiddef * fid = &de->dir$fid;
+	  int filenum = de->dir$fid.fid$w_num + (de->dir$fid.fid$b_nmx<<16);
+	  struct _hm2 * home_block = &data->home_block;
+	  int phy = ods2_index_block_map(VMSLONG(home_block->hm2$w_ibmapvbn) + VMSWORD(home_block->hm2$w_ibmapsize) + filenum - 1, data);
+	  //grub_printf("filen %x %x %x %x %x\n",filenum,fid->fid$w_num,fid->fid$b_nmx,fid->fid$w_seq,phy);
+	  grub_disk_t disk = diro->data->disk;
+	  grub_disk_read(disk, phy, 0, 512, file_header);
+	  //grub_disk_read(disk, VMSLONG(home_block->hm2$l_ibmaplbn) + VMSWORD(home_block->hm2$w_ibmapsize) + (filenum - 1), 0, 512, file_header);
+	  // TODO filepos = 0;
+	  //ods2_read_old((char *) path, 512, disk, data, 0);
+	  // TODO filepos = 0;
+	  //dr = (void *) path;
 
-      enum grub_fshelp_filetype type = GRUB_FSHELP_UNKNOWN;
-      
-
-      
-      //int saved_c = dr->dir$t_name[dr->dir$b_namecount];
-      //dr->dir$t_name[dr->dir$b_namecount]=0;
-      void * filename = grub_my_new_substring(dr->dir$t_name, 0, dr->dir$b_namecount);
-      //dr->dir$t_name[dr->dir$b_namecount]=saved_c;
 
 
-      struct grub_fshelp_node *fdiro;
-      	  fdiro = grub_malloc (sizeof (struct grub_fshelp_node));
+	  enum grub_fshelp_filetype type = GRUB_FSHELP_UNKNOWN;
+
+
+
+	  //int saved_c = dr->dir$t_name[dr->dir$b_namecount];
+	  //dr->dir$t_name[dr->dir$b_namecount]=0;
+	  void * filename = grub_my_new_substring(dr->dir$t_name, 0, dr->dir$b_namecount);
+	  //dr->dir$t_name[dr->dir$b_namecount]=saved_c;
+	  grub_dprintf("ods", "FN %s FN", (char *) filename);
+
+
+	  struct grub_fshelp_node *fdiro;
+	  fdiro = grub_malloc (sizeof (struct grub_fshelp_node));
 	  if (! fdiro)
 	    return 0;
 
 	  fdiro->data = diro->data;
-	  fdiro->ino = grub_le_to_cpu32(filenum);
+	  fdiro->filenum = grub_le_to_cpu32(filenum);
 
 	  //filename[dirent.namelen] = '\0';
 
-	  
-	      fdiro->inode_read = 0;
 
-	      if ((VMSLONG(data->file_header.fh2$l_filechar) & FH2$M_DIRECTORY)==0)
-		type = GRUB_FSHELP_REG;
-	      else
-		type = GRUB_FSHELP_DIR;
+	  fdiro->file_header_read = 0;
 
-	      if (hook (filename, type, fdiro, hook_data))
+	  if ((VMSLONG(fdiro->file_header.fh2$l_filechar) & FH2$M_DIRECTORY)==0)
+	    type = GRUB_FSHELP_REG;
+	  else
+	    type = GRUB_FSHELP_DIR;
+
+	  if (hook (filename, type, fdiro, hook_data))
 	    return 1;
 
 
-      
-      dr = (void *) ((char *) dr + VMSWORD(dr->dir$w_size) + 2);      
-    } while (VMSWORD(dr->dir$w_size) < MAXREC);
 
-    // TODO *(path = (void *) rest) = ch;
-    }
+	  dr = (void *) ((char *) dr + VMSWORD(dr->dir$w_size) + 2);
+	  void * filename2 = grub_my_new_substring(dr->dir$t_name, 0, dr->dir$b_namecount);
+	  grub_dprintf("ods", "FN %s FN", (char *) filename2);
+      } while (VMSWORD(dr->dir$w_size) < MAXREC);
+
+      // TODO *(path = (void *) rest) = ch;
+  }
 
   return 0;
-  }
+}
 
 int
 get_fm2_val(unsigned short ** mpp, unsigned int * phyblk, unsigned int *phylen) {
   unsigned short *mp=*mpp;
   if (phyblk==0 || phylen==0) return -1;
-	switch (VMSWORD(*mp) >> 14) {
-	case FM2$C_PLACEMENT:
-	  *phylen = 0;
-	  (*mpp)++;
-	  break;
-	case FM2$C_FORMAT1:
-	  *phylen = (VMSWORD(*mp) & 0377) + 1;
-	  *phyblk = ((VMSWORD(*mp) & 037400) << 8) | VMSWORD(mp[1]);
-	  (*mpp) += 2;
-	  break;
-	case FM2$C_FORMAT2:
-	  *phylen = (VMSWORD(*mp) & 037777) + 1;
-	  *phyblk = (VMSWORD(mp[2]) << 16) | VMSWORD(mp[1]);
-	  (*mpp) += 3;
-	  break;
-	case FM2$C_FORMAT3:
-	  *phylen = ((VMSWORD(*mp) & 037777) << 16) + VMSWORD(mp[1]) + 1;
-	  *phyblk = (VMSWORD(mp[3]) << 16) | VMSWORD(mp[2]);
-	  (*mpp) += 4;
-	  break;
-	default:
-	  return 0;
-	}
-	return 1;
+  switch (VMSWORD(*mp) >> 14) {
+    case FM2$C_PLACEMENT:
+      *phylen = 0;
+      (*mpp)++;
+      break;
+    case FM2$C_FORMAT1:
+      *phylen = (VMSWORD(*mp) & 0377) + 1;
+      *phyblk = ((VMSWORD(*mp) & 037400) << 8) | VMSWORD(mp[1]);
+      (*mpp) += 2;
+      break;
+    case FM2$C_FORMAT2:
+      *phylen = (VMSWORD(*mp) & 037777) + 1;
+      *phyblk = (VMSWORD(mp[2]) << 16) | VMSWORD(mp[1]);
+      (*mpp) += 3;
+      break;
+    case FM2$C_FORMAT3:
+      *phylen = ((VMSWORD(*mp) & 037777) << 16) + VMSWORD(mp[1]) + 1;
+      *phyblk = (VMSWORD(mp[3]) << 16) | VMSWORD(mp[2]);
+      (*mpp) += 4;
+      break;
+    default:
+      return 0;
+  }
+  return 1;
 }
 
 static int
@@ -322,14 +362,14 @@ ods2_index_block_map (unsigned int logical_block, struct grub_ods2_data * data)
   me = mp + index_header->fh2$b_map_inuse;
 
   while (mp < me) {
-    unsigned int phyblk, phylen;
-    get_fm2_val(&mp,&phyblk,&phylen);
-    //grub_printf("get %x %x %x %x %x %x",mp,phyblk,phylen,curvbn,logical_block,index_header->fh2$b_map_inuse);
-    if (logical_block>=curvbn && logical_block<(curvbn+phylen))
-      return phyblk+logical_block-curvbn;
-    if (phylen!=0) {
-      curvbn += phylen;
-    }
+      unsigned int phyblk, phylen;
+      get_fm2_val(&mp,&phyblk,&phylen);
+      //grub_printf("get %x %x %x %x %x %x",mp,phyblk,phylen,curvbn,logical_block,index_header->fh2$b_map_inuse);
+      if (logical_block>=curvbn && logical_block<(curvbn+phylen))
+	return phyblk+logical_block-curvbn;
+      if (phylen!=0) {
+	  curvbn += phylen;
+      }
   }
   return -1;
 }
@@ -339,19 +379,19 @@ ods2_block_map (unsigned int logical_block, struct grub_ods2_data * data)
 {
   unsigned int curvbn=0; // should be 1, but I guess grub starts at 0
   unsigned short *me;
-  struct _fh2 * file_header = &data->file_header;
+  struct _fh2 * file_header = data->file_header;
   unsigned short *mp = (unsigned short *) file_header + file_header->fh2$b_mpoffset;
   me = mp + file_header->fh2$b_map_inuse;
 
   while (mp < me) {
-    unsigned int phyblk, phylen;
-    get_fm2_val(&mp,&phyblk,&phylen);
-    //    grub_printf("get %x %x %x %x %x %x",mp,phyblk,phylen,curvbn,logical_block,file_header->fh2$b_map_inuse);
-    if (logical_block>=curvbn && logical_block<(curvbn+phylen))
-      return phyblk+logical_block-curvbn;
-    if (phylen!=0) {
-      curvbn += phylen;
-    }
+      unsigned int phyblk, phylen;
+      get_fm2_val(&mp,&phyblk,&phylen);
+      //    grub_printf("get %x %x %x %x %x %x",mp,phyblk,phylen,curvbn,logical_block,file_header->fh2$b_map_inuse);
+      if (logical_block>=curvbn && logical_block<(curvbn+phylen))
+	return phyblk+logical_block-curvbn;
+      if (phylen!=0) {
+	  curvbn += phylen;
+      }
   }
   return -1;
 }
@@ -360,7 +400,7 @@ static grub_disk_addr_t
 grub_ods2_read_block (grub_fshelp_node_t node, grub_disk_addr_t fileblock)
 {
   struct grub_ods2_data *data = node->data;
-  //struct _fh2 *inode = &node->inode;
+  //struct _fh2 *file_header = &node->file_header;
   int map = ods2_block_map (fileblock, data);
   return map;
 }
@@ -404,28 +444,28 @@ grub_ods2_open (struct grub_file *file, const char *name)
   if (err)
     goto fail;
 
-  if (! fdiro->inode_read)
+  if (! fdiro->file_header_read)
     {
-      err = grub_ods2_read_inode (data, fdiro->ino, &fdiro->inode);
+      err = grub_ods2_read_file_header (data, fdiro->filenum, &fdiro->file_header);
       if (err)
 	goto fail;
     }
 
-  grub_memcpy (data->inode, &fdiro->inode, sizeof (struct _fh2));
+  grub_memcpy (data->file_header, &fdiro->file_header, sizeof (struct _fh2));
   grub_free (fdiro);
 
-  struct _fh2 * file_header = &data->file_header;
+  struct _fh2 * file_header = data->file_header;
   //struct _fatdef * fat = &file_header->fh2$w_recattr;
   int filemax = (VMSSWAP(file_header->fh2$w_recattr.fat$l_efblk)<<9)-512+file_header->fh2$w_recattr.fat$w_ffbyte;
 
   file->size = grub_le_to_cpu32 (filemax);
-  //file->size |= ((grub_off_t) grub_le_to_cpu32 (data->inode->size_high)) << 32;
+  //file->size |= ((grub_off_t) grub_le_to_cpu32 (data->file_header->size_high)) << 32;
   file->data = data;
   file->offset = 0;
 
   return 0;
 
- fail:
+  fail:
   if (fdiro != &data->diropen)
     grub_free (fdiro);
   grub_free (data);
@@ -499,21 +539,24 @@ static int
 grub_ods2_dir_iter (const char *filename, enum grub_fshelp_filetype filetype,
 		    grub_fshelp_node_t node, void *data)
 {
+  grub_dprintf("ods", "f %s", filename);
   struct grub_ods2_dir_ctx *ctx = data;
   struct grub_dirhook_info info;
 
   grub_memset (&info, 0, sizeof (info));
-  if (! node->inode_read)
+  if (! node->file_header_read)
     {
-      grub_ods2_read_inode (ctx->data, node->ino, &node->inode);
+      grub_dprintf("ods", "f %x", node->filenum);
+      grub_dprintf("ods", "e %x", grub_errno);
+      grub_ods2_read_file_header (ctx->data, node->filenum, &node->file_header);
       if (!grub_errno)
-	node->inode_read = 1;
+	node->file_header_read = 1;
       grub_errno = GRUB_ERR_NONE;
     }
-  if (node->inode_read)
+  if (node->file_header_read)
     {
       info.mtimeset = 1;
-      // TODO info.mtime = grub_le_to_cpu32 (node->inode.mtime);
+      // TODO info.mtime = grub_le_to_cpu32 (node->file_header.mtime);
     }
 
   info.dir = ((filetype & GRUB_FSHELP_TYPE_MASK) == GRUB_FSHELP_DIR);
@@ -525,11 +568,13 @@ static grub_err_t
 grub_ods2_dir (grub_device_t device, const char *path, grub_fs_dir_hook_t hook,
 	       void *hook_data)
 {
+  //grub_dprintf("ods", "NOBAD %s", path);
   struct grub_ods2_dir_ctx ctx = {
-    .hook = hook,
-    .hook_data = hook_data
+      .hook = hook,
+      .hook_data = hook_data
   };
   struct grub_fshelp_node *fdiro = 0;
+  //grub_dprintf("ods", "d %lx", (long unsigned int) &fdiro);
 
   grub_dl_ref (my_mod);
 
@@ -540,18 +585,22 @@ grub_ods2_dir (grub_device_t device, const char *path, grub_fs_dir_hook_t hook,
   grub_fshelp_find_file (path, &ctx.data->diropen, &fdiro,
 			 grub_ods2_iterate_dir, 0,
 			 GRUB_FSHELP_DIR);
+  grub_dprintf("ods", "NOBAD");
   if (grub_errno)
     goto fail;
 
+  grub_dprintf("ods", "NOBAD");
   grub_ods2_iterate_dir (fdiro, grub_ods2_dir_iter, &ctx);
 
- fail:
+  fail:
   if (fdiro != &ctx.data->diropen)
     grub_free (fdiro);
   grub_free (ctx.data);
 
   grub_dl_unref (my_mod);
 
+  //grub_dprintf("ods", "BAD");
+  //grub_errno = GRUB_ERR_BAD_FS;
   return grub_errno;
 }
 
@@ -600,21 +649,21 @@ grub_ods2_mtime (__attribute__ ((unused)) grub_device_t device, grub_int64_t *tm
 }
 
 static struct grub_fs grub_ods2_fs =
-  {
-    .name = "ods2",
-    .fs_dir = grub_ods2_dir,
-    .fs_open = grub_ods2_open,
-    .fs_read = grub_ods2_read,
-    .fs_close = grub_ods2_close,
-    .fs_label = grub_ods2_label,
-    .fs_uuid = grub_ods2_uuid,
-    .fs_mtime = grub_ods2_mtime,
+    {
+	.name = "ods2",
+	.fs_dir = grub_ods2_dir,
+	.fs_open = grub_ods2_open,
+	.fs_read = grub_ods2_read,
+	.fs_close = grub_ods2_close,
+	.fs_label = grub_ods2_label,
+	.fs_uuid = grub_ods2_uuid,
+	.fs_mtime = grub_ods2_mtime,
 #ifdef GRUB_UTIL
-    .reserved_first_sector = 1,
-    .blocklist_install = 1,
+	.reserved_first_sector = 1,
+	.blocklist_install = 1,
 #endif
-    .next = 0
-  };
+	.next = 0
+    };
 
 GRUB_MOD_INIT(ods2)
 {
