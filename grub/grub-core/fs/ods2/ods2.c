@@ -152,11 +152,16 @@ grub_my_new_substring (const char *buf,
 /* Read the file_header INO for the file described by DATA into FILE_HEADER.  */
 static grub_err_t
 grub_ods2_read_file_header (struct grub_ods2_data *data,
-			    int ino, struct _fh2 *file_header)
+			    int filenum, struct _fh2 *file_header)
 {
   /* Read the file_header.  */
 
-  ods2_read_old((void *) file_header, sizeof(struct _fh2), data -> disk, data, ino);
+  struct _hm2 * home_block = &data->home_block;
+  int phy = ods2_index_block_map(VMSLONG(home_block->hm2$w_ibmapvbn) + VMSWORD(home_block->hm2$w_ibmapsize) + filenum - 1, data);
+  //grub_printf("filen %x %x %x %x %x\n",filenum,fid->fid$w_num,fid->fid$b_nmx,fid->fid$w_seq,phy);
+  grub_disk_t disk = data->disk;
+  grub_disk_read(disk, phy, 0, 512, file_header);
+  //ods2_read_old((void *) file_header, sizeof(struct _fh2), data -> disk, data, filenum);
   printbuf16(file_header);
 
   return 0;
@@ -310,8 +315,8 @@ grub_ods2_iterate_dir (grub_fshelp_node_t dir,
 
 
 	  dr = (void *) ((char *) dr + VMSWORD(dr->dir$w_size) + 2);
-	  void * filename2 = grub_my_new_substring(dr->dir$t_name, 0, dr->dir$b_namecount);
-	  grub_dprintf("ods", "FN %s FN", (char *) filename2);
+	  //void * filename2 = grub_my_new_substring(dr->dir$t_name, 0, dr->dir$b_namecount);
+	  //grub_dprintf("ods", "FN %s FN", (char *) filename2);
       } while (VMSWORD(dr->dir$w_size) < MAXREC);
 
       // TODO *(path = (void *) rest) = ch;
@@ -425,6 +430,7 @@ grub_ods2_read_file (grub_fshelp_node_t node,
 static grub_err_t
 grub_ods2_open (struct grub_file *file, const char *name)
 {
+  grub_dprintf("ods", "f %s", name);
   struct grub_ods2_data *data;
   struct grub_fshelp_node *fdiro = 0;
   grub_err_t err;
@@ -455,10 +461,13 @@ grub_ods2_open (struct grub_file *file, const char *name)
   grub_free (fdiro);
 
   struct _fh2 * file_header = data->file_header;
+  grub_dprintf("ods", "num %x", fdiro->filenum);
+  printbuf16(file_header);
   //struct _fatdef * fat = &file_header->fh2$w_recattr;
   int filemax = (VMSSWAP(file_header->fh2$w_recattr.fat$l_efblk)<<9)-512+file_header->fh2$w_recattr.fat$w_ffbyte;
 
   file->size = grub_le_to_cpu32 (filemax);
+  grub_dprintf("ods", "s %x %x %x", (unsigned int) file->size, (unsigned int) file_header->fh2$w_recattr.fat$l_efblk, (unsigned int) file_header->fh2$w_recattr.fat$w_ffbyte);
   //file->size |= ((grub_off_t) grub_le_to_cpu32 (data->file_header->size_high)) << 32;
   file->data = data;
   file->offset = 0;
@@ -486,13 +495,14 @@ grub_ods2_close (grub_file_t file)
 }
 
 int
-ods2_read_old (char *buf, int len, grub_disk_t disk, struct grub_ods2_data * data, int filepos)
+ods2_read_old (char *buf, int len, grub_disk_t disk, struct grub_ods2_data * data, __attribute__ ((unused)) int fileposn)
 {
   int logical_block;
   int offset;
   int map;
   int ret = 0;
   int size = 0;
+  int filepos = 0;
 
   while (len > 0)
     {
@@ -508,6 +518,7 @@ ods2_read_old (char *buf, int len, grub_disk_t disk, struct grub_ods2_data * dat
       if (size > len)
 	size = len;
 
+      grub_dprintf("ods", "old %x %x %x", (unsigned int) map, (unsigned int) offset, (unsigned int) size);
       grub_disk_read(disk, map, offset, size, buf);
 
       buf += size;
@@ -527,7 +538,8 @@ static grub_ssize_t
 grub_ods2_read (grub_file_t file, char *buf, grub_size_t len)
 {
   struct grub_ods2_data *data = (struct grub_ods2_data *) file->data;
-  grub_printf("%lx %lx %lx", (long) data, (long) buf, (long) &len);
+  grub_dprintf("ods", "r %lx %lx %lx", (long) data, (long) buf, (long) &len);
+  grub_dprintf("ods", "r %lx %lx %lx", (long) data, (long) buf, (long) len);
   return grub_ods2_read_file (&data->diropen,
 			      file->read_hook, file->read_hook_data,
 			      file->offset, len, buf);
