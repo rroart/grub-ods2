@@ -1,1 +1,5 @@
 Grub 2.12rc1 with ODS-2.
+
+News:
+
+Is now able to read and boot a file in the MFD.
