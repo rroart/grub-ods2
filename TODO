@@ -1,4 +1,5 @@
 I1: ODS-2 for Grub 2.12 rc1.
+I2: ODS-2 for Grub 2.12.
 
 Bug: ls gives procfs error
 Bug: can not autocomplete
